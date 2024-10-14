@@ -1,0 +1,151 @@
+---
+title: "TP2"
+author: "Richard CHEAM"
+date: "2024-10-03"
+output: html_document
+---
+
+```{r}
+library(survival)
+library(KMsurv)
+library(ggplot2)
+library(ggfortify)
+```
+
+# Load data
+
+```{r}
+data(pneumon)
+pneumon
+```
+
+```{r}
+cat("Dimension of dataframe:", dim(pneumon))
+```
+
+# 1. Check if the variables have been correcly imported, especially the factors
+
+```{r}
+colnames(pneumon)
+```
+
+```{r}
+unique(pneumon$agepn)
+```
+
+```{r}
+unique(pneumon$chldage)
+```
+
+```{r}
+pneumon <- subset(pneumon, select = -agepn)
+pneumon
+```
+
+```{r}
+table(pneumon$hospital)
+```
+
+
+# 2. Plot the Kaplan-Meier estimator for the survival function of the age at pneumonia. Give an estimation and a confidence interval for the probability for a newborn of not having developed pneumonia at 6 months.
+
+```{r}
+KM_fit <- survfit(Surv(chldage, hospital) ~ 1, data = pneumon)
+summary(KM_fit)
+```
+
+```{r}
+autoplot(KM_fit, xlab="Time (months)", ylab="Survival Probability")
+```
+From the summary table: the probability of a newborn not having developed pneumonia is 0.981 with 95% interval [0.976, 0.986].
+
+# Construct a dummy variable Z = 1 if infants were breast fed at birth, 0 if infants were never breast fed, and test the hypothesis H0: there is no difference in distributions of age at first pneumonia between a child with breast fed and one without.
+
+Z = 1 (breast fed), 0 (not)
+
+```{r}
+Z <- numeric(dim(pneumon)[1])
+for (i in 1:dim(pneumon)[1]){
+  if (pneumon$wmonth[i] > 0){
+    Z[i] = 1
+  }
+  else {
+    Z[i] = 0
+  }
+}
+```
+
+Add column Z to DataFrame pneumon.
+
+```{r}
+pneumon$breastFed <- Z
+```
+
+```{r}
+pneumon
+```
+
+```{r}
+#object = Surv(chldage, hospital) ~ 1, data = pneumon
+#to fit = use survfit
+KM_fit <- survfit(Surv(chldage, hospital) ~ breastFed, data = pneumon)
+```
+
+```{r}
+summary(KM_fit)
+```
+```{r}
+autoplot(KM_fit, xlab = "Time (months)", ylab = "Survival Probability")
+```
+
+# 4. Test the hypothesis H0 : βbreastf = 0, i.e., the survival functions for the two types of breast feeding are equal, using the likelihood ratio, and Wald tests. Find the estimate of βbreastf ⋆ , β^breastf ⋆ , its standard error, and the relative risk
+
+```{r}
+cox_fit <- coxph(Surv(chldage, hospital) ~ breastFed, data = pneumon)
+```
+
+```{r}
+summary(cox_fit)
+```
+p-value of these tests are really which mean we can reject H0 which states that breastFed does not affect. Hence, breastFed has effect.
+
+Estimated coefficient is -1.0970.
+Relative risk is 0.3339. 
+Standard error is 0.2973.
+
+```{r}
+summary(cox_fit)$logtest
+summary(cox_fit)$waldtest
+```
+
+# 5. Test the hypothesis that the times to hospitalized pneumonia are the same for the two feeding groups adjusting for each of these factors in a separate model using the Wald test.
+
+Iterate through all column as an additional to breastFed model above. Starting from mtage to sfmonth.
+
+```{r}
+colnames(pneumon)
+```
+
+
+```{r}
+for (var in colnames(pneumon)[3:14]){
+  print(var)
+  fit = coxph(as.formula(paste("Surv(chldage, hospital) ~ breastFed + ", var)), data = pneumon)
+  print(summary(fit))
+  print("++++++++++++++++++++++++++++++++++++++++++++++++")
+}
+```
+
+# 6. Build a model with the view of testing the particular comparison of interest adjusting for the other non controllable fixed covariates in question 4
+
+```{r}
+summary(coxph(Surv(chldage, hospital) ~ ., data = pneumon))
+```
+
+# 7. In the final model, predict the probability of not developing pneumonia at 7 months for a newborn with covariates
+
+```{r}
+summary(survfit(Surv(chldage, hospital) ~ 1, data = pneumon))
+```
+
+

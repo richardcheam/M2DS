@@ -1,0 +1,180 @@
+---
+title: "tp1-sur"
+author: "Richard CHEAM"
+date: "2024-09-26"
+output: pdf_document
+---
+## Import libraries
+
+```{r}
+library(MASS)
+library(asaur)
+library(survival)
+library(KMsurv)
+library(ggplot2)
+library(ggfortify)
+```
+
+## Read dataframe
+
+```{r}
+df <- read.csv(file = "coalition2.csv", header = TRUE)
+head(df)
+```
+
+```{r}
+cat("Dimension of the dataframe:", dim(df))
+```
+
+### 1. Compute and draw the empirical c.d.f. for the variable duration.
+
+```{r}
+X = df$duration
+
+emp_cdf = ecdf(X)
+plot(emp_cdf, col = 'red', main = 'Empirical CDF', xlab = 'duration')
+```
+
+```{r}
+ggplot(data = data.frame(duration = X), aes(x = duration)) + 
+  stat_ecdf(geom = "step", color = "blue", size = 1) +  
+  theme_minimal() + 
+  labs(
+    title = "Empirical Cumulative Distribution Function (CDF) Plot",
+    x = "Duration",
+    y = "Cumulative Probability"
+  )
+```
+
+
+### 2. Compute maximum likelihood estimator for the variable duration for 4 different families.
+
+Parameters of each family are shown below:
+
+```{r}
+fit_normal <- fitdistr(X, "normal")
+fit_weibull <- fitdistr(X, "weibull")
+fit_lognormal <- fitdistr(X, "lognormal")
+fit_gamma <- fitdistr(X, "gamma")
+fit_normal
+fit_weibull
+fit_lognormal
+fit_gamma
+```
+
+### 3. Draw the estimated c.d.f. in each family on the same plot as the empirical c.d.f
+
+```{r}
+cdf_normal <- pnorm(X, mean = fit_normal$estimate['mean'], sd = fit_normal$estimate['sd'])
+
+cdf_weibull <- pweibull(X, shape = fit_weibull$estimate['shape'], scale = fit_weibull$estimate['scale'])
+
+cdf_lognormal <- plnorm(X, meanlog = fit_lognormal$estimate['meanlog'], sdlog = fit_lognormal$estimate['sdlog'])
+
+cdf_gamma <- pgamma(X, shape = fit_gamma$estimate['shape'], rate = fit_gamma$estimate['rate'])
+```
+
+```{r}
+# Create a data frame for plotting
+cdf_data <- data.frame(
+  x = X,
+  normal = cdf_normal,
+  weibull = cdf_weibull,
+  lognormal = cdf_lognormal,
+  gamma = cdf_gamma
+)
+
+# Plot the empirical CDF and estimated CDFs
+ggplot() +
+  stat_ecdf(data = df, aes(x = duration), color = 'black', size = 1, linetype = "dashed") + 
+  geom_line(data = cdf_data, aes(x = x, y = normal, color = 'Normal'), size = 1) +
+  geom_line(data = cdf_data, aes(x = x, y = weibull, color = 'Weibull'), size = 1) +
+  geom_line(data = cdf_data, aes(x = x, y = lognormal, color = 'Lognormal'), size = 1) +
+  geom_line(data = cdf_data, aes(x = x, y = gamma, color = 'Gamma'), size = 1) +
+  labs(x = "Duration", y = "Cumulative Probability", title = "Empirical and Estimated CDFs") +
+  scale_color_manual(values = c('Empirical' = 'black', 'Normal' = 'blue', 'Weibull' = 'green', 'Lognormal' = 'red', 'Gamma' = 'purple')) +
+  theme_minimal()
+```
+
+```{r}
+# Plot the empirical CDF
+plot(emp_cdf, main = "Empirical and Estimated CDFs", xlab = "Duration", ylab = "CDF", col = "black", lwd = 2, verticals = FALSE)
+
+# Add the estimated CDFs using lines()
+plot(X, cdf_normal, col = "blue")    # Normal
+plot(X, cdf_weibull, col = "green")  # Weibull
+plot(X, cdf_lognormal, col = "red")  # Log-normal
+plot(X, cdf_gamma, col = "purple")   # Gamma
+
+# Add a legend
+legend("bottomright", legend = c("Empirical", "Normal", "Weibull", "Log-normal", "Gamma"),
+       col = c("black", "blue", "green", "red", "purple"), lwd = 2, lty = c(1, 2, 3, 4, 5))
+```
+
+# 2. Your own code for the Kaplan-Meier estimator
+
+## 1. Develop a function to compute the Kaplan-Meier estimator that takes as inputs
+
+```{r}
+my_KM <- function(time, sigma){
+  t = sort(unique(time))
+  return()
+}
+
+```
+
+## 2. Consider the pharmocoSmoking data (available in package asaur), compare the results of your code to the one of the function survfit of package survival.
+
+```{r}
+data("pharmacoSmoking")
+df <- pharmacoSmoking
+head(df)
+```
+
+```{r}
+dim(df)
+```
+
+```{r}
+KM_fit <- survfit(Surv(df$ttr, df$relapse) ~ 1)
+summary(KM_fit)
+autoplot(KM_fit, xlab="Time", ylab="Survival Probability")
+```
+
+```{r}
+print(KM_fit$surv)
+cat("\n")
+print(KM_fit$time)
+```
+
+```{r}
+my_KM(df$ttr, df$relapse)
+```
+
+
+## 3. Compute the Greenwood estimator of the variance of the Kaplan-Meier estimator
+
+```{r}
+greenwood_est <- function(KM_est, nb_events, nb_at_risk, time){
+  num_ = nb_events
+  den_ = nb_at_risk * (nb_at_risk - nb_events)
+  tmp = sum(num_/den_ < unique(time))
+  return (KM_est**2 * tmp)
+}
+
+greenwood_est(KM_fit$surv, KM_fit$n.event, KM_fit$n.risk, KM_fit$time)
+```
+
+# Ex3. Left-truncated and right-censored data
+
+```{r}
+data("channing")
+df <- channing
+head(df)
+```
+
+```{r}
+dim(df)
+```
+
+At age 901 how many residents are under observation and still alive
