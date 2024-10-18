@@ -1,0 +1,98 @@
+---
+title: "Lab 3" 
+output: html_notebook
+---
+
+#Exercice 1
+```{r,echo=FALSE}
+library(KMsurv)
+library(tidyverse)
+library(survival)
+```
+
+## Question 1
+
+Importer les données. Créer une nouvelle table ``bmt2``, copie de ``bmt``, puis suprimer ``bmt``
+```{r}
+data(bmt)
+?bmt
+bmt2  = bmt
+rm(bmt)
+```
+
+Dans ``bmt2``, renommer les variables 
+
+  - ``z1`` à ``z10`` par ``"agep" ,   "aged"  ,  "genderp"  ,  "genderd",    "cmvp"  ,  "cmvd"  ,  "waiting"  ,  "FAB" ,   "hospital" ,   "MTW"``. 
+  
+  - ``t2`` par ``DFS`` (disease free survival) et ``d3`` par ``DFSstatus``
+  
+  - ``tp`` par ``tplat`` (time to platelet recovery) et ``dp`` par ``platstatus``
+
+puis recoder les valeurs de la variable ``group`` en ALL, Low, High
+```{r}
+names(bmt2) = c("group", "t1",    "DFS",    "d1"  ,  "d2" ,   "DFSstatus"  ,  "ta"  ,  "da" ,   "tc"   , "dc" ,   "tp" ,   "dp" ,   "agep" ,   "aged"  ,  "genderp"  ,  "genderd",    "cmvp"  ,  "cmvd"  ,  "waiting"  ,  "FAB" ,   "hospital" ,   "MTW"  )
+glimpse(bmt2)
+
+bmt2$group = recode(bmt2$group, "1"="ALL","2"="Low","3"="High")
+bmt2$hospital = recode(bmt2$hospital , "1" = "Ohio State U.", "2" = "Alferd" , "3" = "St. Vincent", "4" = "Hahnemann")
+glimpse(bmt2)
+```
+
+  
+Translater l'âge du patient et du donneur de $-28$. Enlever les variables `` t1``,`` d1``,`` d2``,`` ta``,`` da``,`` tc``,`` dc``
+
+```{r}
+median(bmt2$agep)
+median(bmt2$aged)
+bmt2 = bmt2 %>% mutate(agep=agep-28) %>% mutate(aged=aged-28)
+bmt2 = bmt2 %>% select(-c(t1,d1,d2,ta,da,tc,dc))
+bmt2$id = c(1:nrow(bmt2))
+glimpse(bmt2)
+```
+
+
+## Variable dépendant du temps
+```{r}
+bmt2[c(1,14),]
+filter(bmt2,dp==0)
+```
+http://dmrocke.ucdavis.edu/Class/EPI204-Spring-2017/Lecture14TimeDepVars.pdf
+
+
+
+## A la main
+Créer une ligne dupliquée pour chaque individu
+```{r}
+
+bmt2.tvc <- bmt2[rep(1:dim(bmt2)[1],each=2),]
+id.1 <- !duplicated( bmt2.tvc$id )
+id.2 <- duplicated( bmt2.tvc$id )
+```
+
+Pour la premiere partie, créer les variables ``start`` et ``stop``, l'indicateur d'évènement et les covariables :
+
+- pour le 1er évènement 
+```{r}
+
+bmt2.tvc$start[ id.1 | bmt2.tvc$dp==0 ] <- 0
+bmt2.tvc$stop[ id.1 & bmt2.tvc$dp ==1 ] <- bmt2.tvc[ id.1 &
+bmt2.tvc$dp==1, ]$tp
+bmt2.tvc$DFSstatus[ id.1 & bmt2.tvc$dp==1 ] <- 0
+bmt2.tvc$DFSstatus[ id.1 ] <- 0
+
+```
+- pour le 2nd évènement 
+```{r}
+bmt2.tvc$start[ id.2 & bmt2.tvc$dp==1 ] <- bmt2.tvc[ id.2 &
+bmt2.tvc$tp==1, ]$tp
+bmt2.tvc$stop[ id.2 ] <- bmt2.tvc[ id.2, ]$DFS
+```
+
+## Avec #tmerge
+```{r}
+bmt2_merge <- tmerge(bmt2,bmt2,id=id,endpt=event(DFS,DFSstatus))
+bmt2_merge <- tmerge(bmt2_merge,bmt2,id=id,p_recovery=tdc(tp)) #adds platelet recovery as tdc
+#bmt2_merge)
+head(bmt2_merge)
+summary(bmt2)
+```

@@ -1,0 +1,252 @@
+---
+title: "Lab 3 - Survival Analysis"
+author: "Richard CHEAM"
+date: "2024-10-17"
+output: html_document
+---
+
+# Import libraries
+
+```{r}
+library(KMsurv) #data
+library(tidyverse) #operator %>%
+library(survival) #tmerge()
+library(ggplot2)
+library(ggfortify)
+```
+
+# Load dataset
+
+```{r}
+data(bmt)
+```
+
+```{r}
+head(bmt)
+```
+
+```{r}
+cat("Dimension of dataset:", dim(bmt))
+```
+
+Covariates are $z1, z2, ..., z10$. 
+T is $t2$ and indicator sigma is $d3$.
+Time-dependent variable is of $tp$ and $dp$.
+
+# Question 1
+
+```{r}
+transform <- function(df){
+  #rename 
+  new_df <- df %>%
+  rename(
+    'agep' = 'z1',
+    'aged' = 'z2',
+    'genderp' = 'z3',
+    'genderd' = 'z4',
+    'cmvp' = 'z5',
+    'cmvd' = 'z6',
+    'waiting' = 'z7',
+    'FAB' = 'z8',
+    'hospital' = 'z9',
+    'MTW' = 'z10',
+    'DFS' = 't2',
+    'DFSstatus' = 'd3'
+  )
+  #recode
+  new_df$group <- replace(new_df$group, new_df$group == 1, 'ALL')
+  new_df$group <- replace(new_df$group, new_df$group == 2, 'Low')
+  new_df$group <- replace(new_df$group, new_df$group == 3, 'High')
+  #centered age
+  new_df$agep <- replace(new_df$agep, new_df$agep, new_df$agep - mean(new_df$agep))
+  new_df$aged <- replace(new_df$aged, new_df$aged, new_df$agep - mean(new_df$aged))
+  #remove columns
+  new_df <- subset(new_df, select = -c(t1, d1, d2, ta, da, tc, dc))
+  return(new_df)
+}
+```
+
+
+Rename variables:
+
+```{r}
+bmt <- bmt %>%
+  rename(
+    'agep' = 'z1',
+    'aged' = 'z2',
+    'genderp' = 'z3',
+    'genderd' = 'z4',
+    'cmvp' = 'z5',
+    'cmvd' = 'z6',
+    'waiting' = 'z7',
+    'FAB' = 'z8',
+    'hospital' = 'z9',
+    'MTW' = 'z10',
+    'DFS' = 't2',
+    'DFSstatus' = 'd3'
+  )
+```
+
+```{r}
+colnames(bmt)
+```
+
+
+Recode values taken by $group$
+
+```{r}
+unique(bmt['group'])
+```
+
+```{r}
+bmt$group <- replace(bmt$group, bmt$group == 1, 'ALL')
+bmt$group <- replace(bmt$group, bmt$group == 2, 'Low')
+bmt$group <- replace(bmt$group, bmt$group == 3, 'High')
+```
+
+```{r}
+unique(bmt$group)
+```
+
+```{r}
+mean(bmt$agep)
+mean(bmt$aged)
+```
+
+```{r}
+bmt$agep <- replace(bmt$agep, bmt$agep, bmt$agep - mean(bmt$agep))
+bmt$aged <- replace(bmt$aged, bmt$aged, bmt$agep - mean(bmt$aged))
+```
+
+```{r}
+bmt$aged
+```
+
+```{r}
+bmt2 <- subset(bmt, select = -c(t1, d1, d2, ta, da, tc, dc))
+```
+
+New dataset:
+
+```{r}
+head(bmt2)
+```
+
+```{r}
+cat("Dimension of dataset:", dim(bmt2))
+```
+
+```{r}
+colnames(bmt2)
+```
+
+# 2. Create time-varying variable
+
+Add id column to dataframe
+
+```{r}
+bmt2$id <- seq(1, nrow(bmt2))
+```
+
+```{r}
+bmt2
+```
+
+
+$DFS$ is T and $DFSstatus$ is indicator sigma. 
+
+```{r}
+bmt2_merge <- tmerge(bmt2, bmt2, id = id, event = event(DFS, DFSstatus))
+```
+
+```{r}
+bmt2_merge
+```
+
+```{r}
+bmt2_merge <- tmerge(bmt2_merge, bmt2, id = id, platelet_recov = tdc(tp))
+```
+
+```{r}
+bmt2_merge$platelet_recov
+```
+
+Each value in tp corresponds to the time when platelet recovery occurs for an individual. The tdc(tp) will allow you to model this as a time-dependent covariate that changes its value when the time reaches the specified value for each individual. The tdc(tp) function will dynamically update the covariate platelet_recov at the times specified in tp for each individual. Before tp, the covariate is 0 (no recovery), and after tp, the covariate changes (indicating recovery).
+
+# 3. Construct appropriate cox model
+
+## Factor categorical variables
+
+```{r}
+bmt2_merge$FAB <- replace(bmt2_merge$FAB, bmt2_merge$FAB == 1, 'FAB Grade 4 Or 5 and AML')
+bmt2_merge$FAB <- replace(bmt2_merge$FAB, bmt2_merge$FAB == 0, 'Otherwise')
+
+bmt2_merge$hospital <- replace(bmt2_merge$hospital, bmt2_merge$hospital == 1, 'The Ohio State University')
+bmt2_merge$hospital <- replace(bmt2_merge$hospital, bmt2_merge$hospital == 2, 'Alferd')
+bmt2_merge$hospital <- replace(bmt2_merge$hospital, bmt2_merge$hospital == 3, 'St.Vincent')
+bmt2_merge$hospital <- replace(bmt2_merge$hospital, bmt2_merge$hospital == 4, 'Hahnemann')
+
+bmt2_merge$MTW <- replace(bmt2_merge$MTW, bmt2_merge$MTW == 1, 'Yes')
+bmt2_merge$MTW <- replace(bmt2_merge$MTW, bmt2_merge$MTW == 0, 'No')
+```
+
+```{r}
+bmt2_merge
+```
+
+
+
+## Remove unwanted 
+
+```{r}
+bmt2_merge_for_fit <- subset(bmt2_merge, select = -c(DFS, DFSstatus, dp, tp, id))
+bmt2_merge_for_fit
+```
+
+```{r}
+colnames(bmt2_merge_for_fit)
+```
+
+
+## Fit cox model
+
+```{r}
+cox_model <- coxph(formula = Surv(tstart, tstop, event) ~., data = bmt2_merge_for_fit)
+```
+
+```{r}
+summary(cox_model)
+```
+
+## Variables selection
+
+Selected variables are: 
+
+* z8 (FAB): 1-FAB Grade 4 Or 5 and AML, 0-Otherwise (The French, American, and British (FAB) classification system for acute myeloid leukemia (AML))
+* z9 (hospital): 1-The Ohio State University, 2-Alferd , 3-St. Vincent, 4-Hahnemann
+* z10 (MTW): MTX Used as a Graft-Versus-Host- Prophylactic: 1-Yes 0-No
+
+```{r}
+cox_model_selected_vars <- coxph(formula = Surv(tstart, tstop, event) ~ FAB + hospital + MTW, data = bmt2_merge_for_fit)
+summary(cox_model_selected_vars)
+```
+
+The p-value for all three overall tests are significant, indicating that the model is significant. These tests give the confidence to reject null hypothesis that all of the betas are 0.
+
+The 3 covariates remain significant as p-values are below the threshold 0.05 and have positive impact on survival.
+
+The p-value of FAB is 0.000973 with a hazard ratio (exp(coef)) of 2.0949 indicating a strong relationship between the patients’ FAB classification grade and disease free survival time (Dead/Relapsed or Alive/100% Recovered). FAB increases the hazard by factor of 2.0949.
+
+While hospital reduces the hazard by factor of 0.6828
+
+## Plot
+
+```{r}
+autoplot(survfit(cox_model_selected_vars), color = "#2E9FDF",
+           ggtheme = theme_minimal())
+```
+
+We want to see effect of each covariate:
+
+In this case, we construct a new data frame with two rows, one for each value of FAB; the other covariates are fixed to their lowest level since they are discrete variables. 
+
