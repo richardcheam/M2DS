@@ -1,0 +1,1116 @@
+---
+title: "Survival and Longitudinal Data Analysis Project" 
+author: "Richard CHEAM" 
+date: "2024-10-24" 
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(123)
+```
+
+# Import libraries
+```{r libraries}
+library(ggplot2) # plot
+library(caret) # train_split_test
+library(dplyr)
+library(ggmosaic) # mosaic plot
+library(ggcorrplot) # correlation plot
+library(gridExtra)  # For combining multiple plots horizontally
+library(tidyr)
+library(DescTools)
+
+library(MASS)
+library(ggfortify) # autoplot of survival curve
+library(survival) # KM estimator
+library(survminer)
+library(timereg)
+library(riskRegression)
+library(randomForestSRC)
+library(LTRCforests)
+```
+
+# Read dataset
+
+```{r read data}
+df <- read.csv('hiv.csv', header = TRUE, sep = ',')
+# View(df)
+head(df)
+```
+
+```{r define numerical and categorical variables}
+num_vars = c('time', 'cd4', 'time_obs')
+cat_vars = c('death', 'treatment', 'sex', 'prev_infection', 'azt')
+```
+
+
+# Check for missing values 
+
+```{r get_information}
+# function return None
+get_information <- function(df){
+  # brief information of dataframe from library(dplyr)
+  glimpse(df)
+  
+  # init variables for print
+  dimension = dim(df)
+  missing_val_count = sum(is.na(df))
+  column_names = colnames(df)
+  distinct_subj = length(unique(df$subject))
+  
+  # numerical and categorical variables
+  num_vars = c('time', 'cd4', 'time_obs')
+  cat_vars = c('death', 'treatment', 'sex', 'prev_infection', 'azt')
+  
+  # visualize result
+  cat("\nThe dataframe has", dimension[1], "rows and", dimension[2], "columns\n")
+  cat("Total missing values:", missing_val_count, "\n")
+  cat("Duplicate rows count:", sum(duplicated(df)), "\n") #sum() only counts TRUE values
+  cat("Distinct subjects count in the study:", distinct_subj, "\n")
+  
+  for (var in cat_vars){
+    #df$var will treat var as a literal string, use [[]] to reference the column dynamically by its name
+    cat("Distinct values of variable", var, ":", unique(df[[var]]), "\n") 
+  }
+} 
+
+get_information(df)
+```
+The data has no duplicate rows or missing values. 
+
+# Check consistency of dataset
+
+```{r check for inconsistency}
+# check if a categorical variable is consistent for an individual
+# Alert "not consistent" otherwise return nothing
+is_consistent <- function(df_ind, var){
+  distinct_val = unique(df_ind$var)
+  if (length(distinct_val) > 1){
+    cat(var, "is not consistent for subject", unique(df_ind$subject), "!!!!")
+  } 
+}
+
+
+# get all subjects
+subjects <- unique(df$subject)
+
+# check if each categorical variable and for each subject
+# print if not consistent
+for (cat in cat_vars){
+    for (sub in subjects){
+    df_sub = df[df$subject == sub, ]
+    is_consistent(df_sub, cat)
+  }
+}
+```
+
+No printing alertl. There is no data entry error for this dataset, so we are good to go!
+
+# Reformulate data
+
+Although variable "death" is of type int, but its definition is the life indicator. Hence, we will change its type as we perceive it as a categorical variable. Plus, we will factorize the chr type variables.
+
+```{r}
+# encode variable death
+encode_death <- function(df){
+  # replace column 'death' with second argument as a condition, 0 to 'censoring' and 1 to 'death'
+  df$death = replace(df$death, df$death == 0, 'censoring')
+  df$death = replace(df$death, df$death == 1, 'death')
+  df$death = factor(df$death)
+  return (df)
+}
+```
+
+```{r}
+# copy dataframe
+df_new <- df
+
+# call encode function from function definition section. 0 = censored, 1 = death
+df_new <- encode_death(df_new)
+
+# death is already factorized in function encode_death()
+#df_new <- df_new %>% 
+#mutate(
+#  treatment = factor(treatment),
+#  sex = factor(sex),
+#  prev_infection = factor(prev_infection),
+#  azt = factor(azt)
+#  )
+
+get_information(df_new)
+```
+# Exploratory Data Analysis (EDA)
+
+From this section, we will use the modified dataframe (df_new) without affecting the original one.
+
+## Occurrence of each level of different categorical variables
+
+```{r count levels}
+# get unique row by remove duplicate rows to get info on categorical variables
+df_unique <- df_new %>%
+  group_by(subject) %>%
+  slice_min(time_obs) %>%
+  ungroup()
+
+# count occurrence of each level of each categorical variable
+table(df_unique$death)
+table(df_unique$sex)
+table(df_unique$treatment)
+table(df_unique$prev_infection)
+table(df_unique$azt)
+```
+
+## Numerical analysis
+
+### Statistics summary
+
+```{r stat summary}
+summary(subset(df_new, select = num_vars))
+```
+
+### Histogram
+```{r histogram}
+# looping and plot for each numerical variables
+for (var in num_vars) {
+  # build each layer separately for plot
+  main <- ggplot(data = df_new, mapping = aes_string(x = var))
+  type <- geom_histogram(aes(y = ..density..), binwidth = 2, alpha = 0.85) #aes(y = ..density..) normalize data on the same scale as histogram 
+  density_curve <- geom_density(aes_string(x = var), color = "red", linewidth = 1)
+  title <- labs(title = paste("Histogram of", var), x = var, y = "frequency")
+  theme <- theme_gray()
+  # combine layers
+  graph <- main + type + density_curve + title + theme
+  # display plot
+  show(graph)
+}
+```
+
+cd4 is positively skewed. So, the mean is greater than the median, which in turn is greater than the mode (mean > median > mode). The higher values create a tail extending to the right, which indicates that there is only few people who have significant amount of cd4 cells (healthy). This is often more appropriate to use non-parametric statistical methods.
+
+### Scatter plot for cd4 by different time_obs
+
+```{r}
+main <- ggplot(data = df_new, mapping = aes(x = time_obs, y = cd4))
+type <- geom_point(color = "red", alpha = 0.2)
+title <- labs(title = paste("Scatter plot of cd4 against time_obs"), x = 'time_obs', y = "cd4 cells count")
+theme <- theme_gray()
+# combine layers
+graph <- main + type + type + title + theme
+# display plot
+show(graph)
+```
+Visibly, there are not many subjects who reached 20 values of cd4. At time_obs 0 (start of the study), there is not a single subject who had cd4 cells over 20 but we can observe higher cd4 (above 20) later on, which potentially indicates a positive progress of the treatment. 
+
+### Boxplot
+```{r boxplot}
+# plot each numerical var, group by each categorical var
+for (num in num_vars){
+  for (cat in cat_vars){
+    # build each layer separately for plot
+    main <- ggplot(data = df_new, mapping = aes_string(x = cat, y = num))
+    type <- geom_boxplot(fill = 'grey', color = 'black') 
+    title <- labs(title = paste("Boxplot of", num, "against", cat), x = cat, y = num)
+    theme <- theme_gray()
+    # combine layers
+    graph <- main + type + title + theme
+    # display plot
+    show(graph)
+  }
+}
+
+# Plot cd4, group by each categorical var
+# Reshape data to long format for categorical variables
+tmp <- df_new %>%
+  pivot_longer(cols = cat_vars, names_to = "category", values_to = "category_value")
+
+# Plot with the same category levels grouped together on the x-axis
+ggplot(tmp, aes(x = category_value, y = cd4, fill = category)) +
+  geom_boxplot(position = position_dodge(width = 0.75), color = 'black') +
+  labs(title = "Boxplot of CD4 Count across Categorical Variables",
+       x = "Categorical Variables",
+       y = "CD4 Count") +
+  theme_gray() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Here, from the boxplot of cd4 against each categorical variable, ddI treatment seems to have slightly higher mean of cd4 cells count than ddC treatement. Also, the whisker is higher as well with only one outlier with higest cd4 cells count, approaching 25 of cd4 cells count. 
+
+Female group seems to have higher cd4 cells count than male group with slightly higher mean as well. 
+
+Logically, people without previous AIDS infection have much higher cd4 cells count. Notice that there are many points outside AIDS group whisker which indicates a possible positive progression of the treatment over time. 
+
+Again, it is logical that people who did not fail to tolerate the AZT therapy have higher cd4 cells count (healthier).
+
+## Categorical analysis
+
+### Mosaic plot
+
+Each categorical variable will be shown separately with survival status ($death) using mosaic plot, focusing on univariate relationships which makes it easier to see any clear differences in survival proportions.
+
+```{r mosaic}
+# x aesthetic doesn’t directly correspond to the x-axis as in typical ggplot2
+# x defines the variable that will be split horizontally in the mosaic, while fill determines how the variable is stacked
+for (cat in cat_vars[-1]){ #cat_vars[-1] removes "death" as it is the first element
+  # build layers for ggplot
+  main <- ggplot(df_new) 
+  type <- geom_mosaic(mapping = aes_string(x = paste("product(", cat, ")"), fill = "death")) #gg_mosaic can't recognize cat, paste() is needed
+  title <- labs(title = paste("Mosaic Plot of Survival Status (death) vs.", cat))
+  theme <- theme_minimal()
+  # combine layers
+  graph <- main + type + title + theme
+  # display plot
+  show(graph)
+}
+```
+
+x-axis represents the categorical variables, while y-axis measuring the survival status ($death).
+
+* We can observe horizontal line for treatment group ddC and ddI, which indicates that they are barely different.
+* Same for sex which suggests really small amount of dependency (arguably no difference between two groups).
+* We can see for people without previous AIDS infection (noAIDS), most of the data are censored which suggests a smaller amount of death compares to people with AIDS infection group.
+* Same as azt, since the mosaic plot bars are not equal, we can conclude that the death does depend on whether people failed AZT or not (failure is worse than intolerance).
+
+Now we want to see if the conditional mosaic plot makes any difference. Since the aim of the study is to compare the efficacy and safety of the
+alternative antiretroviral drugs (treatment), each categorical variable will be shown against death proportion conditional treatment. 
+
+### Conditional mosaic plot
+
+```{r conditional mosaic}
+for (cat in setdiff(cat_vars, c('death', 'treatment'))){ #remove death and treatment
+  # build layers for ggplot
+  main <- ggplot(df_new) 
+  type <- geom_mosaic(mapping = aes_string(x = paste("product(treatment)"), conds = paste("product(", cat, ")"), fill = "death")) 
+  title <- labs(title = paste("Mosaic Plot of treatment against death and", cat, "conditions"))
+  theme <- theme_minimal()
+  # combine layers
+  graph <- main + type + title + theme
+  # display plot
+  show(graph)
+}
+```
+
+* There is no sight of significant effectiveness of the treatment though we can see that for female group ddC works slightly better than ddI. Same for male group.
+* For prev_infection condition, there is no difference between the treatment if the subject had AIDS infection before. However, if the subject had no previous infection, ddC treatment is better than ddI as we can see on the right side that the censoring proportion is larger than death. 
+* Once again, ddC treatment shows a better survival proportion until the end of the study than ddI. But, what is interesting is that if they failed AZT therapy, it maybe slightly more effective with ddI treatment.
+
+The conclusion above is a only preliminary observation. To confirm, we would need statistical tests to verify.
+
+## Relationship between covriates
+
+Since there are a mixture of numerical and categorical in the dataset. First, we will need to transform the data to entirely numerical, by creating the corresponding dummy variables.
+
+```{r encode to numerical}
+# encode categorical variables to numerical for correlation matrix
+# note that variable 'death' was already originally int of 0,1
+# as.numeric as repalce treat 0,1 as chr
+# -1 because it returns 1,2 instead of 0,1
+encode_cat_vars <- function(df) {
+  # Encode treatment: ddC = 0, ddI = 1
+  df$treatment <- as.numeric(factor(df$treatment, levels = c('ddC', 'ddI'), labels = c(0, 1))) - 1
+  # Encode sex: male = 0, female = 1
+  df$sex <- as.numeric(factor(df$sex, levels = c('male', 'female'), labels = c(0, 1))) - 1
+  # Encode previous infection: noAIDS = 0, AIDS = 1
+  df$prev_infection <- as.numeric(factor(df$prev_infection, levels = c('noAIDS', 'AIDS'), labels = c(0, 1))) - 1
+  # Encode azt tolerance: intolerance = 0, failure = 1
+  df$azt <- as.numeric(factor(df$azt, levels = c('intolerance', 'failure'), labels = c(0, 1))) - 1
+  return(df)
+}
+
+# copy from df, as death was originally a numerical dichotomous variable 0, 1
+df_numeric <- df
+
+# transform categorical to numerical covariates 
+df_numeric <- encode_cat_vars(df_numeric)
+
+# get detail infromation of encoded (numerical) dataframe
+get_information(df_numeric)
+```
+
+```{r correlation matrix}
+# calculate correlation matrix 
+# remove subject column from dataframe in the calculation
+corr <- cor(subset(df_numeric, select = -c(subject)))
+cat("Correlation matrix\n")
+corr
+cat("\n")
+# computes a matrix of correlation p-values: to mark insignificant cell
+pval_mat <- cor_pmat(subset(df_numeric, select = -c(subject)))
+cat("Matrix of correlation p-values\n")
+pval_mat
+```
+Below is a representation of correlation matrix, which a mark 'X' indicates the no significant coefficient (big p-values)
+
+```{r plot correlation matrix}
+ggcorrplot(corr, lab = TRUE, outline.col = "black", p.mat = pval_mat)
+```
+
+We can observe that:
+* azt positively correlate with prev_infection.
+* treatment only barely correlate with cd4.
+* cd4 negatively correlate with prev_infection. (highest)
+* death correlate with time is logic.
+
+Overall, we don't observe an extreme correlation between covariates, though the highest positive coefficient is 0.57 between azt and prev_infection and the highest negative coefficient is -0.63 between death and time.
+
+## Kaplan-Meier analysis
+ 
+We now represent graphically the survival functions in the subgroups defined by the categorical variables. We will use "df" dataframe, the original dataframe since the Surv: survival object takes status type as integer 0, 1.
+
+```{r baseline KM curve}
+km_fit <- survfit(Surv(time, death) ~ 1, data = df)
+autoplot(km_fit)
+```
+
+ 
+```{r KM curves by each group}
+for (cat in cat_vars[-1]) { # Exclude "death"
+  # Create Kaplan-Meier survival fit
+  cat('++++++++++++++++++++++++++', cat, '++++++++++++++++++++++++++\n')
+  KMfit <- survfit(Surv(time, death) ~ get(cat), data = df) 
+  print(KMfit)
+  show(autoplot(KMfit))
+  cat('\n')
+}
+```
+
+treatment:
+
+The survival curves for ddC and ddI treatment groups are closer to each other, especially in the earlier time periods. However, the ddI group seems to have a slightly better survival probability as time progresses at the end of the study (leveled off at approximately 65% at time 18, and ddC leveled off at 58%), though ddC has a great start but it drops below ddI as time goes. The overlapping confidence intervals suggest that the survival difference between these two treatments may not be statistically significant.
+
+sex: 
+
+The survival probability for females (red line) appears to be lower than that for males (blue line) throughout most of the observed period. The wider confidence intervals for females indicate higher uncertainty in the survival estimate for this group.
+
+prev_infection:
+
+The red line drops quicker than the blue line, indicating that individuals with previous opportunistic AIDS infection have a lower survival probability over time (level off at 45%) compared to those without infection (level off at 85%). The gap between the curves suggests a statistically significant difference, as the confidence intervals for the two groups rarely overlap (just the beginning). This implies that previous AIDS infection status has a notable impact on survival time.
+
+azt: 
+
+Though it is not as significant as prev_infection for those who failed and intolerance of AZT therapy, we still can clearly see the difference, the intolerance group has high survival probability (leveled off at about 70%). The confidence interval overlap each other a bit at the beginning, but in the long run, after time 10, the difference is clearer and the survival rate of intolerance group is also more certain than failure group since its confidence interval is tighter than failure group. 
+
+Conclusion: azt and prev_infection are essential for variable selection. For both variables, the curves are far apart, and the confidence intervals rarely overlap, suggesting that a formal test like the log-rank test would likely find a statistically significant difference between these two groups.
+
+## 2-sample log-rank test
+
+Now we perform log-rank test to see if there is a difference in survival function among the defined groups. Since there 4 categorical variables (death excluded) and each variable has two levels (groups), the 2-sample log-rank test will be used. 
+
+```{r}
+for (cat in cat_vars[-1]) { # Exclude "death"
+  # Create survival object and test Survival Curve Differences
+  cat('++++++++++++++++++++++++++', cat, '++++++++++++++++++++++++++\n')
+  sur_diff <- survdiff(Surv(time, death) ~ get(cat), data = df) 
+  print(sur_diff)
+  cat('\n')
+}
+```
+
+For both treatment and sex:
+
+The p-values are well above the significance threshold 0.05, indicating that there’s no significant difference in survival. Thus, the survival functions for these groups (ddC vs. ddI and female vs. male) are statistically similar in the data, which aligns from the conclusion above.
+
+For prev_infection and azt:
+
+The small p-values (below 0.05) suggest that there is a statistically significant difference in survival between the groups. In other words, it provides evidence that the groups do not share identical survival functions. Again, aligns with the assumption above.
+
+# Statistical modelling and analysis
+
+## Train-test approach
+
+When dealing with longitudinal data where each individual has multiple rows (representing repeated measurements over time), it's essential to avoid splitting the same individual's measurements across both the training and testing sets. Each individual should appear in only one of the sets to ensure that the test set is independent of the training set. 
+
+```{r train-test split}
+# get all subjects
+subjects <- unique(df$subject)
+
+# 80% train, 20% test
+train_subjects <- createDataPartition(subjects, p = 0.8, list = FALSE)
+
+# define train and test dataset without having duplicate individual
+train_df <- df[df$subject %in% subjects[train_subjects], ]
+test_df <- df[!df$subject %in% subjects[train_subjects], ]
+
+# Check the number of subjects in train and test sets
+cat("Number of distinct subjects in train set:", length(unique(train_df$subject)), "\n")
+cat("Number of distinct subjects in test set:", length(unique(test_df$subject)), "\n")
+
+# Verify no subject is in both train and test sets
+cat("Subjects appear in both train and test dataset:", length(intersect(train_df$subject, test_df$subject)), "\n")
+```
+
+```{r get porportion of censored and uncensored data}
+# count status only once for each individual knowing that death status is consistent
+count_death_status <- function(df){
+  unique_subjects = unique(df$subject)
+  total_death = 0
+  total_censored = 0
+  for (sub in unique_subjects){
+    status = unique(df[df$subject == sub, ]$death)
+    if (status == 0){  #censoring
+      total_censored = total_censored + 1
+    }
+    else if (status == 1){ #death
+      total_death = total_death + 1
+    }
+  }
+  cat("Total death:", total_death, "\n")
+  cat("Total censored:", total_censored, "\n")
+  cat("\n")
+  cat("Proportion of death:", (total_death/(total_death + total_censored)) * 100, "\n")
+  cat("Proportion of censored:", (total_censored/(total_death + total_censored)) * 100, "\n")
+}
+
+cat("\n++++++++++++ Initial data ++++++++++++\n")
+count_death_status(df)
+cat("\n++++++++++++ Train data ++++++++++++\n")
+count_death_status(train_df)
+cat("\n++++++++++++ Test data ++++++++++++\n")
+count_death_status(test_df)
+```
+
+Proportion of censored data are more or less the same for both train and test data compared to initial dataset. So there is a balance proportion between train and test dataset of censored and uncensored data.
+
+## Start-stop format
+
+Data is already a long-format type. Time-varying covariate is $cd4$. Others are static binary (time-independent). Since the model assumes proportional hazards, meaning the effect of each covariate is consistent over time, we will transform it to start-stop dataframe.
+
+```{r start-stop format transformation}
+# define time-dependent and time-indepedent dataframes for time-merge
+## time-independent does not have duplicate individual
+df_time_ind <- train_df[!duplicated(train_df$subject), c("subject", "time", "death", "treatment", "sex", "prev_infection", "azt")]
+df_time_dep <- train_df[, c("subject", "time_obs", "cd4")]
+
+df_time_ind <- tmerge(df_time_ind, df_time_ind, id = subject, event = event(time, death))
+df_start_stop <- tmerge(df_time_ind, df_time_dep, id = subject, cd4 = tdc(time_obs, cd4))
+
+df_start_stop <- subset(df_start_stop, select = -c(time, death))
+head(df_start_stop)
+```
+
+## Methodology
+
+### Cox poroportional hazards model
+
+Fit cox model only with variables that are statistically significant from above conclusion. Though we know they are $prev_infection$ and $cd4$, we will fit numerous model to achieve the best one based on AIC/BIC criterion by playing around with predictors based on the knowledge we have above.
+
+```{r fit cox model with different set of covariates}
+cox_lin_cd4_prev <- coxph(formula = Surv(tstart, tstop, event) ~ cd4 + prev_infection, data = df_start_stop, x = TRUE)
+cox_lin_cd4_prev_sex <- coxph(formula = Surv(tstart, tstop, event) ~ prev_infection + cd4 + sex, data = df_start_stop, x = TRUE)
+cox_lin_cd4_prev_treat <- coxph(formula = Surv(tstart, tstop, event) ~ prev_infection + cd4 + treatment, data = df_start_stop, x = TRUE)
+cox_lin_cd4_prev_sex_treat <- coxph(formula = Surv(tstart, tstop, event) ~ prev_infection + cd4 + sex + treatment, data = df_start_stop, x = TRUE)
+cox_lin_full <- coxph(formula = Surv(tstart, tstop, event) ~ cd4 + prev_infection + azt + sex + treatment, data = df_start_stop, x = TRUE)
+```
+
+```{r get AIC/BIC dataframe}
+AIC(cox_lin_cd4_prev, cox_lin_cd4_prev_sex, cox_lin_cd4_prev_treat, cox_lin_cd4_prev_sex_treat, cox_lin_full)
+BIC(cox_lin_cd4_prev, cox_lin_cd4_prev_sex, cox_lin_cd4_prev_treat, cox_lin_cd4_prev_sex_treat, cox_lin_full)
+```
+
+Though $treatment$ does not show a strong predictive power in log-rank test, we will keep it for fitting since it is one the main research question and also the longitudinal study of the initial was to study the effectiveness of the two treatments as well. Model with $treatment$ has predictor has the lowest AIC but BIC is slightly higher than those without. 
+
+#### Variable selection, step model
+
+```{r stepwise regression for variable selection}
+# Fit the initial Cox model with all covariates
+cox_lin_full <- coxph(formula = Surv(tstart, tstop, event) ~ cd4 + prev_infection + azt + sex + treatment, data = df_start_stop, x = TRUE, id = subject)
+
+# Perform stepwise selection using AIC
+step_model <- stepAIC(cox_lin_full, direction = "both")  
+
+# View the selected model
+summary(step_model)
+
+autoplot(survfit(step_model))
+```
+
+Stepwise algorithm indicates that azt does not contribute meaningful predictive power based on this dataset. sex and treatment are close to 0.05. cd4 and prev_infectionnoAIDS are statistically significant at the 0.05 level. 
+
+The hazard ratio for cd4 (0.83812) indicates that for each unit increase in cd4, the hazard of the event decreases by about 16.2% (1 - 0.83812). The hazard ratio for prev_infectionnoAIDS (0.37761) indicates that patients with no prior AIDS infection have a much lower hazard (reduced by 62.2% compared to those with AIDS)
+
+Concordance = 0.735: This suggests that the model has reasonable discriminatory power, meaning the model can correctly order pairs of individuals 73.5% of the time based on their risk of the event. Also, the likelihood ratio test, Wald test, and score test all have highly significant p-values, suggesting that the overall model is statistically significant.
+
+```{r}
+brier_results <- Score(
+  object = list(cox = step_model),  # Model to evaluate
+  formula = Surv(time, death) ~ 1,  # Survival formula (specify the time and event variables)
+  data = test_df,  # Test data for evaluation
+  metrics = "brier",  # Calculate Brier score
+  cens.model = "km",
+  times=sort(unique(test_df$time)) # Sequence of times to evaluate Brier score
+)
+print(brier_results)
+print(brier_results$Brier$score)
+plotBrier(brier_results)
+```
+
+### Beyond linearity
+
+Martingale residual works only for continuous covariate, so we refit with cd4 to see the effect.
+
+```{r}
+ggcoxfunctional(formula = Surv(tstart, tstop, event) ~ cd4, 
+                data = df_start_stop, 
+                xvar = "cd4",
+                title = "Martingale Residuals for CD4",
+                ggtheme = theme_gray())
+```
+
+There is no visible systematic pattern or curve, it supports the notion that $cd4$ could be adequately modeled with a linear term in the Cox model.
+
+```{r}
+cox.zph(step_model)
+plot(cox.zph(step_model))
+ggcoxzph(cox.zph(step_model))
+```
+
+The global test p-value for the Schoenfeld residuals is above the level of 0.05. This suggests that, globally, there is no strong evidence to reject the proportional hazards assumption for the model that covariates have constant coefficient. So, linear cox model is enough for this dataset.
+
+```{r}
+ggcoxdiagnostics(step_model, type = "dfbeta",
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+
+ggcoxdiagnostics(step_model, type = "deviance",
+                 linear.predictions = FALSE, ggtheme = theme_bw())
+```
+
+### Non-linear cox proportional hazards model
+
+```{r}
+step_model_nonlin <- coxph(formula = Surv(tstart, tstop, event) ~ pspline(cd4) + prev_infection + sex + treatment, data = df_start_stop, x = TRUE)
+summary(step_model_nonlin)
+autoplot(survfit(step_model_nonlin))
+```
+
+```{r}
+AIC(step_model_nonlin)
+BIC(step_model_nonlin)
+cox.zph(step_model_nonlin)
+```
+
+For non-linearity case, the chisq value low with a high p-value > 0.05, suggesting that a linear effect of cd4 is sufficient to explain its association with survival. In other words, the data does not provide strong evidence for a nonlinear relationship between cd4 and the hazard; so a simple linear term for cd4 might be sufficient.
+
+### Default random forest
+
+```{r}
+set.seed(1)
+# factor all column for random_forest
+df2 <- data.frame(lapply(train_df, factor))
+# except time and death 
+df2$time <- train_df$time
+df2$death <- train_df$death
+
+head(df2)
+```
+
+Random Forest naturally diminishes the impact of unimportant variables, we will fit with all predictors.
+
+```{r}
+rf_simple <- rfsrc(Surv(time, death) ~ ., data = df2)
+summary(rf_simple)
+```
+
+```{r}
+cat(rf_simple$ntree, "\n")
+cat(rf_simple$mtry, "\n")
+cat(rf_simple$nodedepth)
+```
+
+### Calibrated random forest using grid search
+
+```{r}
+# Define the parameters grid
+param_grid = expand.grid(ntree = c(100, 200, 300, 400, 500, 700),
+                          mtry = c(1, 2, 3, 4, 5, 10, 12, 15),
+                          nodedepth = c(1, 2, 3, 4, 5, 7, 10))
+
+# Initialize a list to store the models
+models = list()
+
+# Perform grid search
+for (i in 1:nrow(param_grid)) {
+  rf_model = rfsrc(Surv(time, death) ~ .,
+                    data = df2,
+                    ntree = param_grid$ntree[i],
+                    mtry = param_grid$mtry[i],
+                    nodedepth = param_grid$nodedepth[i])
+
+  models[[i]] = list(model = rf_model, params = param_grid[i, ])
+}
+
+# Evaluate models using Brier score and choose the optimal one based on a test data
+# Initialize an empty vector to store the Brier scores
+test_brier_scores = numeric(length(models))
+
+# Iterate through models using a for loop
+for (i in seq_along(models)) {
+  model = models[[i]]$model
+  score_cv = Score(list("Tree-based model" = model), formula = Surv(time, death) ~ 1, data = test_df)
+  test_brier_scores[i] = score_cv$Brier$score$Brier[2]
+}
+
+# Identify the optimal model based on the brier score
+best_model_index = which.min(test_brier_scores)
+best_model = models[[best_model_index]]
+print(best_model)
+
+# Save the optimal random forest model
+rf_opt = best_model$model
+```
+
+optimal values for parameters: 
+* ntree = 100 (number of trees)
+* mtry = 4 (number of variables to possibly split at each node)
+* nodedepth = 7 (maximum depth of a tree)
+
+# Performance
+
+## Embedded or integraetd brier score
+
+```{r function to get breir and integrated brier score}
+get_embeded_brier_score <- function(model, test_data) {
+  # Calculate the Brier scores at multiple time points
+  brier_res <- Score(
+    object = list("Input Model" = model),  # Model to evaluate
+    formula = Surv(time, death) ~ 1,  # Survival formula (specify the time and event variables)
+    data = test_data,  # Test data for evaluation
+    metrics = "brier",  # Calculate Brier score
+    cens.model = "rfsrc"
+  )
+  return(brier_res$Brier$score$Brier[2]) #index 1 is null model
+}
+```
+
+```{r}
+embedded_brier_lin <- get_embeded_brier_score(step_model, test_df)
+print(paste("Embedded Brier Score for linear cox model:", embedded_brier_lin))
+
+embedded_brier_nonlin <- get_embeded_brier_score(step_model_nonlin, test_df)
+print(paste("Embedded Brier Score for non-linear cox model:", embedded_brier_nonlin))
+
+embedded_brier_simple_rf <- get_embeded_brier_score(rf_simple, test_df)
+print(paste("Embedded Brier Score for default random forest:", embedded_brier_simple_rf))
+
+embedded_brier_simple_rf_opt <- get_embeded_brier_score(rf_opt, test_df)
+print(paste("Embedded Brier Score for optimal random forest:", embedded_brier_simple_rf_opt))
+```
+
+Although the statistical test for nonlinearity is proved to be not significant, we can see that it has slightly better predictive performance than simple linear model.
+
+## Concordance index
+
+```{r calculate cindex for cox models}
+#instruction: https://stat.ethz.ch/R-manual/R-devel/library/survival/html/concordance.html
+p1 <- -predict(step_model)
+p2 <- -predict(step_model_nonlin)
+res_cindex <- concordance(Surv(tstart, tstop, event) ~ p1 + p2, df_start_stop)
+res_cindex
+cat("\n")
+print(paste("Cox linear Harrell's C-index:", res_cindex$concordance[1]))
+print(paste("Cox non-linear Harrell's C-index:", res_cindex$concordance[2]))
+```
+
+```{r calculate c-index for randomforest}
+#Paper: https://academic.oup.com/ije/article/45/5/1406/2450919?login=true
+#discussion on C-index = 1 - get.cindex(): https://www.reddit.com/r/learnmachinelearning/comments/1cmf576/how_do_i_interpret_a_random_forest_survival/
+#instruction: https://www.randomforestsrc.org/articles/survival.html
+rf_simple_cindex = 1 - get.cindex(rf_simple$yvar[,1], rf_simple$yvar[,2], rf_simple$predicted.oob)
+print(paste("Simple random forest Harrell's C-index:", rf_simple_cindex))
+
+# Predict survival probabilities or risk scores from the model
+#cfit <- concordance(Surv(df2$time, df2$death) ~ predict(rf_simple)$predicted + predict(opt_rf)$predicted + predict(step_model) + predict(step_model_nonlin))
+#1 - cfit$concordance
+rf_opt_cindex = 1 - get.cindex(rf_opt$yvar[,1], rf_opt$yvar[,2], rf_opt$predicted.oob)
+print(paste("Calibrated random forest Harrell's C-index:", rf_opt_cindex))
+```
+
+# Visual representation of performance
+
+## Brier score
+
+```{r}
+# this return a dataframe for plot 
+get_brier <- function(model){
+  brier_results <- Score(
+    object = list(model = model),  # Model to evaluate
+    formula = Surv(time, death) ~ 1,  # Survival formula (specify the time and event variables)
+    data = test_df,  # Test data for evaluation
+    metrics = "brier",  # Calculate Brier score
+    cens.model = "km",
+    times=sort(unique(test_df$time)) # Sequence of times to evaluate Brier score
+  )
+  scores = tibble(brier_results$Brier$score)
+  scores = scores %>% filter(model == "model")
+  performances <- tibble(model = scores$Brier, times = scores$times)
+  return(performances)
+}
+```
+
+ 
+```{r build brier score dataframe}
+performances_df <- data.frame(
+  # they have the same times
+  times = get_brier(step_model)$times,
+  cox = get_brier(step_model)$model,
+  cox_non_lin = get_brier(step_model_nonlin)$model,
+  rf_simple = get_brier(rf_simple)$model,
+  rf_opt = get_brier(rf_opt)$model
+)
+```
+
+```{r plot brier score for all models}
+# merge performance df
+performances_long <- performances_df %>%
+  pivot_longer(cols = c(cox, cox_non_lin, rf_simple, rf_opt),
+               names_to = "model", 
+               values_to = "brier_score")
+
+ggplot(performances_long, aes(x = times, y = brier_score, color = model)) +
+  geom_line() + # For line plot, you can change to geom_bar() for bar plot
+  labs(title = "Model Performance Comparison",
+       x = "Time", 
+       y = "Brier score",
+       color = "Model") +
+  theme_gray() 
+```
+
+## Survival curves
+
+```{r}
+km_fit <- survfit(Surv(time, death) ~ 1, data=df)
+kmi <- rep("Kaplan-Meier",length(km_fit$time))
+km_df <- data.frame(km_fit$time, km_fit$surv, kmi)
+names(km_df) <- c("Time","Surv","Model")
+
+# survival curve for cox is derived from the fitted model using survfit(), so unlike forest model
+cox_fit <- survfit(step_model)
+coxi <- rep("Linear Cox",length(cox_fit$time))
+cox_df <- data.frame(cox_fit$time,cox_fit$surv,coxi)
+names(cox_df) <- c("Time","Surv","Model")
+
+cox_nonlin_fit <- survfit(step_model_nonlin)
+coxi <- rep("Non-linear Cox", length(cox_nonlin_fit$time))
+cox_nonlin_df <- data.frame(cox_nonlin_fit$time, cox_nonlin_fit$surv, coxi)
+names(cox_nonlin_df) <- c("Time","Surv","Model")
+
+#RF-based survival models need predictions on a dataset (test or train) because survival probabilities are estimated for each individual and we combine these probabilities for the survival curve
+
+rf_pred <- predict(rf_simple, newdata = test_df)
+rf_time <- rf_pred$time.interest  # Extract time points
+rf_surv <- apply(rf_pred$survival, 2, mean)  # Average survival probability across individuals
+rfi <- rep("Random Forest", length(rf_time))  # Label for the model
+rf_df <- data.frame(Time = rf_time, Surv = rf_surv, Model = rfi)
+
+rf_opt_pred <- predict(rf_opt, newdata = test_df)
+rf_opt_time <- rf_opt_pred$time.interest  # Extract time points
+rf_opt_surv <- apply(rf_opt_pred$survival, 2, mean)  # Average survival probability across individuals (columns)
+rfi_opt <- rep("Optimal Random Forest", length(rf_opt_time))  # Label for the model
+rf_opt_df <- data.frame(Time = rf_opt_time, Surv = rf_opt_surv, Model = rfi_opt)
+
+plot_df <- rbind(km_df, cox_df, cox_nonlin_df, rf_df, rf_opt_df)
+
+main <- ggplot(plot_df, aes(x = Time, y = Surv, color = Model))
+title <- labs(title = "Survival Curves of Various Models")
+main + geom_line() + title
+```
+
+# Aalen's additive regression
+
+```{r}
+aa_fit <- aareg(Surv(tstart, tstop, event) ~ . - subject, data = df_start_stop)
+summary(aa_fit)
+```
+
+The plots show how the effects of the covariates change over time.
+
+```{r}
+autoplot(aa_fit)
+```
+
+# LTRCForest, ensemble methods
+
+```{r}
+# https://cran.r-project.org/web/packages/LTRCforests/LTRCforests.pdf
+df_start_stop_factor <- df_start_stop %>% 
+  mutate(
+    treatment = factor(treatment),
+    sex = factor(sex),
+    prev_infection = factor(prev_infection),
+    azt = factor(azt)
+    )
+
+Formula = Surv(tstart, tstop, event) ~ cd4 + prev_infection + sex + treatment
+```
+
+## Conditional inference forest
+
+```{r}
+# define time-dependent and time-indepedent dataframes for time-merge
+## time-independent does not have duplicate individual
+df_time_ind <- test_df[!duplicated(test_df$subject), c("subject", "time", "death", "treatment", "sex", "prev_infection", "azt")]
+df_time_dep <- test_df[, c("subject", "time_obs", "cd4")]
+
+df_time_ind <- tmerge(df_time_ind, df_time_ind, id = subject, event = event(time, death))
+test_df_start_stop <- tmerge(df_time_ind, df_time_dep, id = subject, cd4 = tdc(time_obs, cd4))
+
+test_df_start_stop <- subset(test_df_start_stop, select = -c(time, death))
+head(test_df_start_stop)
+```
+
+```{r}
+LTRCCIFobj = ltrccif(formula = Formula, data = df_start_stop_factor)
+```
+
+```{r}
+# Time points
+#tpnt = sort(unique(df_start_stop$tstop))
+#Predobj = predictProb(LTRCCIFobj, time.eval = tpnt, newdata = test_df_start_stop, newdata.id = subject)
+# Ensure tpnt is within the range of tau
+#tau = seq(min(df_start_stop$tstop), max(df_start_stop$tstop), length.out = length(df_start_stop$tstop))
+# Ensure you have the correct time points for prediction
+#Predobj = predictProb(LTRCCIFobj, time.eval = tpnt, time.tau = tau)
+```
+
+```{r brier score}
+Obj <- Surv(df_start_stop$tstart, df_start_stop$tstop, df_start_stop$event)
+# Embedded 
+#IBS = sbrier_ltrc(obj = Obj, pred = Predobj, type = "IBS")
+## Compute the Brier score at each value of tpnt
+#BS = sbrier_ltrc(obj = Obj, pred = Predobj, type = "BS")
+## Plot the Brier scores
+#plot(BS$Time, BS$BScore, pch = 20, xlab = "Time", ylab = "Brier score", col = 2)
+```
+
+## Relative risk forest
+
+# Variable Importance (random forest)
+
+```{r}
+smp <- subsample(rf_simple)
+```
+
+```{r}
+# two events of death status so target = 2
+# resize plot to fit variable names
+par(mar = c(5, 8, 4, 2))
+plot.subsample(smp, target = 2, xlab = "Variable Importance") 
+```
+
+Nothing new, prev_infection is important, however, for forest based model, $azt$ should be considered.
+
+# Synthetic profile and scenario analysis
+
+Since there are only two levels for each categorical variable, we construct a new data frame one for each value and the other covariates are fixed as below:
+
+* if they are continuous variables: mean
+* if they are discrete variables: mode 
+
+```{r}
+# define mean and mode respectively
+cd4_mean <- mean(df$cd4)
+treatment_mode <- Mode(df$treatment)[1] #value of [1] index
+azt_mode <- Mode(df$azt)[1]
+previnfection_mode <- Mode(df$prev_infection)[1]
+sex_mode <- Mode(df$sex)[1]
+```
+
+We will fit a full model with all relevant predictors, even if some are less significant statistically. This will assess the survival probabilities comprehensively for various sets of covariates.
+
+```{r}
+cox_all <- coxph(formula = Surv(tstart, tstop, event) ~ cd4 + prev_infection + azt + sex + treatment, data = df_start_stop, x = TRUE)
+```
+
+## sex impact 
+
+Consider that, we want to assess the impact of the sex on the estimated survival probability beyond 18 months. 
+
+```{r}
+sex_df <- with(df,data.frame(sex = unique(df$sex),
+                             cd4 = rep(cd4_mean, 2),
+                             treatment = rep(treatment_mode, 2), 
+                             azt = rep(azt_mode, 2),
+                             prev_infection = rep(previnfection_mode, 2)
+                             )
+                          )
+sex_df
+
+sex_fit <- survfit(cox_all, newdata = sex_df)
+ggsurvplot(sex_fit, conf.int = TRUE, legend.labs=unique(df$sex),
+           ggtheme = theme_minimal(), data = sex_df)
+summary(sex_fit, times = 18)
+```
+
+sex does not differ the survival probability, they are exactly equal.
+
+## treatment impact
+
+Consider that, we want to assess the impact of the treatment on the estimated survival probability beyond 18 months. 
+
+```{r}
+treatment_df <- with(df,data.frame(sex = rep(sex_mode, 2),
+                             cd4 = rep(cd4_mean, 2),
+                             treatment = unique(df$treatment), 
+                             azt = rep(azt_mode, 2),
+                             prev_infection = rep(previnfection_mode, 2)
+                             )
+                          )
+treatment_df
+
+treatment_fit <- survfit(cox_all, newdata = treatment_df)
+ggsurvplot(treatment_fit, conf.int = TRUE,ggtheme = theme_minimal(), data = treatment_df, legend.labs=unique(df$treatment))
+summary(treatment_fit, times = 18)
+```
+
+ddC treatment has better surival rate than ddI treatment group.
+
+## prev_infection impact
+
+```{r}
+prev_inf_df <- with(df,data.frame(sex = rep(sex_mode, 2),
+                             cd4 = rep(cd4_mean, 2),
+                             treatment = rep(treatment_mode, 2), 
+                             azt = rep(azt_mode, 2),
+                             prev_infection = unique(df$prev_infection)
+                             )
+                    )
+print(prev_inf_df)
+
+prev_inf_fit <- survfit(cox_all, newdata = prev_inf_df)
+ggsurvplot(prev_inf_fit, conf.int = TRUE, ggtheme = theme_minimal(), data = prev_inf_df, legend.labs=unique(df$prev_infection))
+summary(prev_inf_fit, times = 18)
+```
+
+previous infection strongly impacts the survival rate since those with noAIDS infection have higher probability 0.827 > 0.608.
+
+## azt impact
+
+```{r}
+azt_df <- with(df,data.frame(sex = rep(sex_mode, 2),
+                             cd4 = rep(cd4_mean, 2),
+                             treatment = rep(treatment_mode, 2), 
+                             azt = unique(df$azt),
+                             prev_infection = rep(previnfection_mode, 2)
+                             )
+                    )
+print(azt_df)
+
+azt_fit <- survfit(cox_all, newdata = azt_df)
+ggsurvplot(azt_fit, conf.int = TRUE, ggtheme = theme_minimal(), data = azt_df, legend.labs=unique(df$azt))
+summary(azt_fit, times = 18)
+```
+
+No difference whether they were previously fail or intolerance to azt therapy. 
+
+```{r}
+azt_df <- with(df,data.frame(sex = c("male", "female"),
+                             cd4 = rep(cd4_mean, 2),
+                             treatment = rep(treatment_mode, 2), 
+                             azt = unique(df$azt),
+                             prev_infection = rep(previnfection_mode, 2)
+                             )
+                    )
+print(azt_df)
+
+azt_fit <- survfit(cox_all, newdata = azt_df)
+ggsurvplot(azt_fit, conf.int = TRUE, ggtheme = theme_minimal(), data = azt_df, legend.labs=unique(df$azt))
+summary(azt_fit, times = 18)
+```
+
+## cd4 impact 
+
+```{r}
+cd4_df <- with(df,data.frame(sex = rep(sex_mode, 3),
+                             cd4 = c(1, mean(df$cd4), 15),
+                             treatment = rep(treatment_mode, 3), 
+                             azt = rep(azt_mode, 3),
+                             prev_infection = rep(previnfection_mode, 3)
+                             )
+                    )
+print(cd4_df)
+
+cd4_fit <- survfit(cox_all, newdata = cd4_df)
+ggsurvplot(cd4_fit, conf.int = TRUE, ggtheme = theme_minimal(), data = cd4_df, legend.labs=c("Low", "Medium", "High"))
+summary(cd4_fit, times = 18)
+```
+
+cd4 cell count has huge impact on survival probability.
+
+## Mixed impact
+
+There are many possibilities to vary covariates. We will do it intuitively based on information we have so far from the analysis. Information we have so far from synthetic data:
+
+* male has slightly better survival rate than female.
+* ddC is more effective than ddI. 
+* intolerance people have slightly better survival rate than failure. 
+* cd4 and prev_infection has huge impact. 
+
+```{r}
+#mixed_df <- with(df,data.frame(sex = c("male", "male", "female"),
+#                            cd4 = c(mean(df$cd4), 10, 10),
+#                             treatment = c("ddC", "ddC", "ddC"), 
+#                             azt = c("intolerance", "failure", "intolerance"),
+#                            prev_infection = c("noAIDS", "noAIDS", "noAIDS")
+#                             )
+#                    )
+mixed_df <- with(df,data.frame(sex = c("male", "male", "female"),
+                             cd4 = c(1, 7, 15),
+                             treatment = c("ddC", "ddC", "ddC"), 
+                             azt = c("intolerance", "intolerance", "intolerance"),
+                             prev_infection = c("AIDS", "AIDS", "AIDS")
+                             )
+                    )
+print(mixed_df)
+
+mixed_fit <- survfit(cox_all, newdata = mixed_df)
+ggsurvplot(mixed_fit, conf.int = TRUE, ggtheme = theme_minimal(), data = mixed_df, legend.labs=c("Low", "Medium", "High"))
+summary(mixed_fit, times = 18)
+```
+
+By varying different set covariates manually (I do not put the code for each case since it will take too much space), we can confirm that:
+
+* ddC is unconditionally always better than ddI, does not matter if a subject is male/female, fail or tolerate AZT, previously infected or not.
+* cd4 and prev_infection still have a lot of say in survival probability. However, theoratically, if a subject were to have high cd4 and previously got infected, he/she will likely to surivive after 18 months. Though it is not common, but we can assume that cd4 is the most powerful predictor.
+* With the same cd4, same treatment, same infection condition, even though a male failed the azt therapy, he will have survival probability than female that did not fail (intolerance).
+
+## Conditional probability
+
+For simplicity, we work on an individual with intolerance condition toward AZT therapy.
+
+```{r}
+prev_inf_df <- with(df,data.frame(sex = rep(sex_mode, 1),
+                             cd4 = rep(cd4_mean, 1),
+                             treatment = rep(treatment_mode, 1), 
+                             azt = rep(azt_mode, 1),
+                             prev_infection = unique(df$prev_infection)[1]
+                             )
+                    )
+print(prev_inf_df)
+
+prev_inf_fit <- survfit(step_model, newdata = prev_inf_df)
+ggsurvplot(prev_inf_fit, conf.int = TRUE, ggtheme = theme_minimal(), data = prev_inf_df, legend.labs=unique(df$prev_infection)[1])
+cat("+++++++++++++++++++++++ Survival rate after 12 months +++++++++++++++++++++++ \n\n")
+summary(prev_inf_fit, times = 12)
+cat("\n")
+cat("+++++++++++++++++++++++ Survival rate after 18 months +++++++++++++++++++++++ \n\n")
+summary(prev_inf_fit, times = 18)
+```
+
+```{r conditional probability knowing he/she has been alive for 12 months}
+cat("+++++++++++++++++++++++ Survival rate knowing that patient survives for 12 months +++++++++++++++++++++++ \n")
+summary(prev_inf_fit, times = 18)$surv / summary(prev_inf_fit, times = 12)$surv
+```
+
+We can see that the probability of survival has increased because by knowing that the subject has already survived for 12 months, meaning the treatment progresses well. Hence, it is logic both theoretically and practically that it goes higher. 
+
+# Link to reference
+
+https://ggplot2-book.org/layers
+https://rstudio.github.io/cheatsheets/html/data-visualization.html
+https://haleyjeppson.github.io/ggmosaic/reference/geom_mosaic.html
+http://www.sthda.com/english/wiki/ggcorrplot-visualization-of-a-correlation-matrix-using-ggplot2
+https://bioconnector.github.io/workshops/r-survival.html
+https://maximilianrohde.com/posts/tmerge/
+http://www.sthda.com/english/wiki/cox-model-assumptions#testing-non-linearity
+https://www.randomforestsrc.org/articles/getstarted.html
+https://rviews.rstudio.com/2017/09/25/survival-analysis-with-r/
+
